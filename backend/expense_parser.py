@@ -2,14 +2,18 @@ from __future__ import annotations
 
 import json
 import logging
+import re
+import statistics
 from dataclasses import dataclass
 from datetime import date
 from typing import Any, Dict, List, Optional
 
+from sqlalchemy import extract, func
 from sqlalchemy.orm import Session
 
 from . import anomaly_detector as anomaly_detector_module
 from .llm_client import llm_client
+from .models import Expense as ExpenseModel
 from .schemas import ParsedExpense
 from .summary_buffer import get_spending_summary
 
@@ -41,6 +45,162 @@ def _lifestyle_insight(merchant: str, category: str) -> str:
     )
 
 logger = logging.getLogger(__name__)
+
+# ── Savings-advice intent detection ──────────────────────────────────────────
+
+_SAVINGS_RE = re.compile(
+    r'save\s+money|saving\s+money|'
+    r'cut\s+(?:back|down|spending|costs?)|'
+    r'reduce\s+(?:my\s+)?(?:spending|expenses?|costs?)|'
+    r'where\s+(?:can|should|am|do)\s+i\s+(?:save|cut|reduce|spend\s+less)|'
+    r'how\s+(?:can|should|do)\s+i\s+(?:save|reduce|cut|spend\s+less)|'
+    r'(?:biggest|largest|top)\s+expenses?|most\s+expensive|'
+    r'where\s+(?:does|is|are)\s+(?:my\s+)?(?:money|spending|expenses?)\s+go|'
+    r'where\s+(?:does|is)\s+my\s+money|money\s+going|'
+    r'(?:spending|expense)\s+(?:breakdown|analysis|report|summary|review)|'
+    r'(?:financial|budget)\s+(?:advice|tips?|help|review)|'
+    r'overspend|too\s+much\s+on|spend\s+less|audit\s+my\s+spend',
+    re.IGNORECASE,
+)
+
+
+def _is_savings_question(message: str) -> bool:
+    """Return True when the message is asking for financial advice, not logging an expense."""
+    # If there's a clear monetary amount it's almost certainly an expense log
+    if re.search(r'\$\s*\d|\b\d+\s*(?:dollars?|bucks?|cad|usd)\b', message, re.IGNORECASE):
+        return False
+    return bool(_SAVINGS_RE.search(message))
+
+
+def _build_savings_analytics(db: Session) -> dict:
+    """
+    Gather category drift, top merchants, and subscription data from the DB.
+    Returns a compact dict passed to the LLM (or local fallback) for advice.
+    """
+    today = date.today()
+    cur_y, cur_m = today.year, today.month
+
+    # Category totals this month
+    current_rows = (
+        db.query(ExpenseModel.category, func.sum(ExpenseModel.amount))
+        .filter(
+            extract("year", ExpenseModel.expense_date) == cur_y,
+            extract("month", ExpenseModel.expense_date) == cur_m,
+            ExpenseModel.requires_approval == False,  # noqa: E712
+        )
+        .group_by(ExpenseModel.category)
+        .all()
+    )
+
+    # Previous 3 calendar months
+    prev_months: list[tuple[int, int]] = []
+    for i in range(1, 4):
+        m = cur_m - i
+        y = cur_y
+        while m <= 0:
+            m += 12
+            y -= 1
+        prev_months.append((y, m))
+
+    category_breakdown: list[dict] = []
+    month_total = 0.0
+    for cat, cur_total in current_rows:
+        if not cat:
+            continue
+        month_total += float(cur_total)
+        prev_totals: list[float] = []
+        for py, pm in prev_months:
+            val = (
+                db.query(func.coalesce(func.sum(ExpenseModel.amount), 0.0))
+                .filter(
+                    extract("year", ExpenseModel.expense_date) == py,
+                    extract("month", ExpenseModel.expense_date) == pm,
+                    ExpenseModel.category == cat,
+                    ExpenseModel.requires_approval == False,  # noqa: E712
+                )
+                .scalar()
+            ) or 0.0
+            prev_totals.append(float(val))
+        median_val = statistics.median(prev_totals) if prev_totals else 0.0
+        drift_pct = (
+            ((float(cur_total) - median_val) / median_val * 100) if median_val > 0 else 0.0
+        )
+        category_breakdown.append({
+            "category": cat,
+            "this_month": round(float(cur_total), 2),
+            "3mo_median": round(median_val, 2),
+            "drift_pct": round(drift_pct, 1),
+        })
+    category_breakdown.sort(key=lambda x: x["this_month"], reverse=True)
+
+    # Top 5 merchants this month by total
+    month_start = date(cur_y, cur_m, 1)
+    top_merchants = (
+        db.query(
+            ExpenseModel.merchant,
+            func.sum(ExpenseModel.amount),
+            func.count(ExpenseModel.id),
+        )
+        .filter(
+            ExpenseModel.expense_date >= month_start,
+            ExpenseModel.requires_approval == False,  # noqa: E712
+        )
+        .group_by(ExpenseModel.merchant)
+        .order_by(func.sum(ExpenseModel.amount).desc())
+        .limit(5)
+        .all()
+    )
+
+    # Active subscriptions this month
+    subscriptions = (
+        db.query(ExpenseModel.merchant, ExpenseModel.amount)
+        .filter(
+            ExpenseModel.category == "subscriptions",
+            extract("year", ExpenseModel.expense_date) == cur_y,
+            extract("month", ExpenseModel.expense_date) == cur_m,
+        )
+        .all()
+    )
+
+    return {
+        "period": today.strftime("%B %Y"),
+        "month_total": round(month_total, 2),
+        "category_breakdown": category_breakdown,
+        "top_merchants": [
+            {"merchant": m, "total": round(float(t), 2), "visits": int(v)}
+            for m, t, v in top_merchants
+        ],
+        "subscriptions": [
+            {"merchant": m, "amount": round(float(a), 2)} for m, a in subscriptions
+        ],
+        "subscriptions_total": round(sum(float(a) for _, a in subscriptions), 2),
+        "drift_warnings": [
+            {
+                "category": c["category"],
+                "drift_pct": c["drift_pct"],
+                "this_month": c["this_month"],
+                "3mo_median": c["3mo_median"],
+            }
+            for c in category_breakdown
+            if abs(c["drift_pct"]) >= 15 and c["3mo_median"] > 0
+        ],
+    }
+
+
+async def _run_savings_pipeline(message: str, db: Session) -> "ParseResult":
+    """Query the DB for real analytics and ask the LLM for personalised advice."""
+    try:
+        analytics = _build_savings_analytics(db)
+        advice = await llm_client.get_savings_advice(message, analytics)
+    except Exception as exc:
+        logger.exception("Savings pipeline error: %s", exc)
+        advice = "I had trouble pulling your spending data. Try asking again in a moment."
+    return ParseResult(
+        expenses=[],
+        reply=advice,
+        needs_clarification=False,
+        follow_up_question=None,
+    )
 
 
 @dataclass
@@ -88,6 +248,10 @@ async def _run_pipeline(
     db: Session,
 ) -> ParseResult:
     """Inner pipeline — called by parse_expenses_from_message inside a safety net."""
+    # Savings / advice intent — skip expense extraction and query the DB directly
+    if _is_savings_question(message):
+        return await _run_savings_pipeline(message, db)
+
     try:
         llm_result = await llm_client.extract_expenses(message, history)
     except Exception as exc:

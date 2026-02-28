@@ -11,11 +11,13 @@ const API_BASE = "http://localhost:8000";
 
 export async function sendChatMessage(
   message: string,
-  history: { role: string; content: string }[] = []
+  history: { role: string; content: string }[] = [],
+  pendingExpenseId?: number | null
 ): Promise<ChatResponse> {
   const { data } = await axios.post<ChatResponse>(`${API_BASE}/chat`, {
     message,
     history,
+    pending_expense_id: pendingExpenseId ?? null,
   });
   return data;
 }

@@ -35,6 +35,7 @@ class ChatHistoryItem(BaseModel):
 class ChatMessage(BaseModel):
     message: str = Field(..., description="Raw user message in natural language")
     history: List["ChatHistoryItem"] = Field(default_factory=list)
+    pending_expense_id: Optional[int] = None  # ID of the in-progress expense awaiting clarification
 
 
 class ParsedExpense(BaseModel):
@@ -65,6 +66,7 @@ class ChatResponse(BaseModel):
     expenses: List[ExpenseRead]
     recommendations: List[StrategicRecommendation]
     needs_clarification: bool = False
+    pending_expense_id: Optional[int] = None  # Returned when a clarification is pending
 
 
 class ApprovalDecision(BaseModel):

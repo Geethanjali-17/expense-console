@@ -889,6 +889,62 @@ class LLMClient:
         except Exception:
             return default
 
+    async def get_savings_advice(self, message: str, analytics: dict) -> str:
+        """
+        Generate personalised savings advice backed by real DB analytics.
+        Falls back to _local_savings_advice when no API key or on any error.
+        """
+        if not self.api_key:
+            return _local_savings_advice(analytics)
+
+        system_prompt = (
+            "You are a sharp, data-driven personal financial advisor embedded in a spending tracker app. "
+            "The user has asked a question about their finances and you have access to their REAL spending data.\n\n"
+            "Rules:\n"
+            "- Reference specific categories, exact dollar amounts, and merchant names from the data.\n"
+            "- Identify the top 2-3 concrete savings opportunities with specific numbers.\n"
+            "- Call out categories significantly above their 3-month average and explain what's driving the spike.\n"
+            "- If subscriptions exist, mention the total and name any that seem redundant.\n"
+            "- Be direct and specific — avoid generic advice like 'make a budget' or 'track your spending'.\n"
+            "- Write in second person ('You're spending...'), warm and conversational tone.\n"
+            "- Use 3-5 short paragraphs. Each paragraph = one insight or recommendation.\n"
+            "- End with a short invite to dig deeper ('Want me to break down any of these further?').\n"
+            "- Do NOT use markdown headers, bullet symbols, or asterisks — plain text with line breaks only.\n"
+            "- Do NOT repeat the raw JSON back — synthesise it into actionable insight."
+        )
+
+        user_content = (
+            f"User's question: {message}\n\n"
+            f"Their spending data:\n{json.dumps(analytics, indent=2)}"
+        )
+
+        payload = {
+            "model": self.model,
+            "messages": [
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_content},
+            ],
+        }
+        try:
+            async with httpx.AsyncClient(timeout=25.0) as client:
+                resp = await client.post(
+                    "https://api.openai.com/v1/chat/completions",
+                    headers={
+                        "Authorization": f"Bearer {self.api_key}",
+                        "Content-Type": "application/json",
+                    },
+                    json=payload,
+                )
+                resp.raise_for_status()
+                data = resp.json()
+                return data["choices"][0]["message"]["content"].strip()
+        except (HTTPStatusError, RequestError) as exc:
+            logger.warning("LLM savings advice error: %s — using local fallback", exc)
+            return _local_savings_advice(analytics)
+        except Exception as exc:
+            logger.warning("Unexpected savings advice error: %s — using local fallback", exc)
+            return _local_savings_advice(analytics)
+
     async def analyze_drift(self, drifts: list[dict[str, Any]]) -> list[dict[str, Any]]:
         """
         Send category drift data to the LLM for Wealthsimple-tone insights.
@@ -1238,6 +1294,69 @@ def _local_drift_insights(drifts: list[dict[str, Any]]) -> list[dict[str, Any]]:
                 "status": "stable",
             })
     return results
+
+
+########################################################################
+# Local savings-advice fallback (no API key)
+########################################################################
+
+def _local_savings_advice(analytics: dict) -> str:
+    """Rule-based savings advice built from DB analytics when no LLM is available."""
+    period = analytics.get("period", "this month")
+    month_total = analytics.get("month_total", 0.0)
+    breakdown = analytics.get("category_breakdown", [])
+    warnings = analytics.get("drift_warnings", [])
+    subs = analytics.get("subscriptions", [])
+    subs_total = analytics.get("subscriptions_total", 0.0)
+    top_merchants = analytics.get("top_merchants", [])
+
+    lines = [f"Here's where your money is going in {period} (${month_total:,.2f} total):\n"]
+
+    # Drift warnings — highest-value savings opportunities
+    if warnings:
+        lines.append("Categories running above your 3-month average:")
+        for w in warnings[:4]:
+            cat = w["category"].title()
+            pct = w["drift_pct"]
+            this = w["this_month"]
+            avg = w["3mo_median"]
+            arrow = "↑" if pct > 0 else "↓"
+            lines.append(
+                f"  {arrow} {cat}: ${this:,.2f} this month vs your usual ${avg:,.2f} "
+                f"({'+' if pct > 0 else ''}{pct:.0f}%)"
+            )
+        lines.append("")
+
+    # Subscriptions
+    if subs_total > 0:
+        sub_names = ", ".join(s["merchant"] for s in subs)
+        lines.append(
+            f"Subscriptions: ${subs_total:,.2f}/month — {sub_names}. "
+            "Check if you're actively using all of them."
+        )
+        lines.append("")
+
+    # Biggest spending category
+    if breakdown:
+        top = breakdown[0]
+        lines.append(
+            f"Your biggest category is {top['category'].title()} "
+            f"at ${top['this_month']:,.2f}. "
+            "Even a 10% reduction here would add up over the year."
+        )
+        lines.append("")
+
+    # Top merchant
+    if top_merchants:
+        m = top_merchants[0]
+        lines.append(
+            f"Top merchant: {m['merchant']} — ${m['total']:,.2f} across "
+            f"{m['visits']} visit{'s' if m['visits'] != 1 else ''} this month."
+        )
+        lines.append("")
+
+    lines.append("Click any drift card in the Intelligence Hub to deep-dive into a category. Anything specific you'd like to focus on?")
+    return "\n".join(lines)
 
 
 llm_client = LLMClient()

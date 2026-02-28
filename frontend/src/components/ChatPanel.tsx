@@ -17,8 +17,9 @@ export function ChatPanel({ triggerRefresh }: ChatPanelProps) {
       createdAt: new Date().toISOString(),
     },
   ]);
-  const [input, setInput]         = useState("");
-  const [isSending, setIsSending] = useState(false);
+  const [input, setInput]                     = useState("");
+  const [isSending, setIsSending]             = useState(false);
+  const [pendingExpenseId, setPendingExpenseId] = useState<number | null>(null);
   const scrollRef  = useRef<HTMLDivElement | null>(null);
   const submitting = useRef(false);
 
@@ -51,11 +52,19 @@ export function ChatPanel({ triggerRefresh }: ChatPanelProps) {
         .filter((m) => m.id !== "welcome")
         .map((m) => ({ role: m.role, content: m.content }));
 
-      const response = await sendChatMessage(trimmed, history);
+      const response = await sendChatMessage(trimmed, history, pendingExpenseId);
       const replyText =
         typeof response?.assistant_message === "string" && response.assistant_message.length > 0
           ? response.assistant_message
           : "Done! I\u2019ve recorded that for you.";
+
+      // Track the in-progress expense ID so the next message can update it
+      // instead of creating a duplicate entry.
+      if (response.needs_clarification && response.pending_expense_id) {
+        setPendingExpenseId(response.pending_expense_id);
+      } else {
+        setPendingExpenseId(null);
+      }
 
       setMessages((prev) => [
         ...prev,
@@ -63,6 +72,7 @@ export function ChatPanel({ triggerRefresh }: ChatPanelProps) {
       ]);
       triggerRefresh?.();
     } catch (err: unknown) {
+      setPendingExpenseId(null);
       let msg = "Something went wrong. Please try again in a moment.";
       if (axios.isAxiosError(err)) {
         if (!err.response) {
@@ -111,7 +121,7 @@ export function ChatPanel({ triggerRefresh }: ChatPanelProps) {
         {orderedMessages.map((msg) => (
           <div key={msg.id} className={`flex ${msg.role === "user" ? "justify-end" : "justify-start"}`}>
             <div
-              className={`max-w-[82%] rounded-2xl px-4 py-2.5 text-[0.8rem] leading-relaxed ${
+              className={`max-w-[82%] rounded-2xl px-4 py-2.5 text-[0.8rem] leading-relaxed whitespace-pre-line ${
                 msg.role === "user"
                   ? "bg-indigo-600/90 text-white shadow-lg shadow-indigo-600/20"
                   : "bg-white/[0.06] text-slate-200 ring-1 ring-white/[0.06]"

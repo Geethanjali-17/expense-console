@@ -28,6 +28,7 @@ export interface ChatResponse {
   expenses: Expense[];
   recommendations: StrategicRecommendation[];
   needs_clarification: boolean;
+  pending_expense_id?: number | null;  // ID of the in-progress expense awaiting clarification
 }
 
 

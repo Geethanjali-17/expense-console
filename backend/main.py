@@ -3,8 +3,8 @@ from __future__ import annotations
 import calendar
 import json
 import statistics
-from datetime import date
-from typing import List
+from datetime import date, datetime, timedelta
+from typing import List, Optional
 
 from fastapi import Depends, FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
@@ -62,6 +62,62 @@ def on_startup():
                 pass  # column already exists
 
 
+def _find_updatable_expense(
+    db: Session,
+    pe_amount: float,
+    pe_merchant: str,
+    pending_id: Optional[int],
+) -> Optional[Expense]:
+    """
+    Return an existing Expense to UPDATE rather than inserting a duplicate.
+
+    Three-priority lookup:
+      1. Explicit pending_id supplied by the frontend (most reliable).
+      2. Any 'Pending' draft with the same amount created in the last 5 minutes
+         — handles the case where the user answers a clarification question.
+      3. Exact same merchant + amount created in the last 60 seconds
+         — catches re-extraction duplicates from the LLM or regex path.
+    """
+    # Priority 1: frontend sent back the exact ID of the in-progress expense
+    if pending_id:
+        row = db.get(Expense, pending_id)
+        if row and row.merchant == "Pending":
+            return row
+
+    if pe_merchant == "Pending":
+        # A new Pending record is intentional; skip the remaining checks.
+        return None
+
+    # Priority 2: orphaned Pending draft (same amount, last 5 min)
+    cutoff5 = datetime.utcnow() - timedelta(minutes=5)
+    draft = (
+        db.query(Expense)
+        .filter(
+            Expense.merchant == "Pending",
+            Expense.amount == pe_amount,
+            Expense.created_at >= cutoff5,
+        )
+        .order_by(Expense.created_at.desc())
+        .first()
+    )
+    if draft:
+        return draft
+
+    # Priority 3: exact duplicate (same merchant + amount, last 60 s)
+    cutoff60 = datetime.utcnow() - timedelta(seconds=60)
+    dupe = (
+        db.query(Expense)
+        .filter(
+            func.lower(Expense.merchant) == pe_merchant.lower(),
+            Expense.amount == pe_amount,
+            Expense.created_at >= cutoff60,
+        )
+        .order_by(Expense.created_at.desc())
+        .first()
+    )
+    return dupe
+
+
 @app.post("/chat", response_model=ChatResponse)
 async def chat_with_assistant(
     payload: ChatMessage,
@@ -89,22 +145,41 @@ async def chat_with_assistant(
         # Pending expenses start with approved=False so the approval gate can
         # distinguish them from intentionally-null normal expenses.
         initial_approved = False if requires_approval else None
-        expense = Expense(
-            merchant=pe.merchant,
-            amount=pe.amount,
-            currency=pe.currency or "USD",
-            category=pe.category,
-            note=pe.note,
-            expense_date=pe.expense_date or date.today(),
-            financial_impact_score=pe.financial_impact_score,
-            strategic_insight=pe.strategic_insight,
-            ai_reasoning_path=pe.ai_reasoning_path,
-            anomaly_flags=pe.anomaly_flags,
-            requires_approval=requires_approval,
-            approved=initial_approved,
+
+        # Update-or-create: prefer patching an existing Pending/duplicate record
+        existing = _find_updatable_expense(
+            db, pe.amount, pe.merchant, payload.pending_expense_id
         )
-        db.add(expense)
-        saved_expenses.append(expense)
+        if existing:
+            existing.merchant = pe.merchant
+            existing.category = pe.category or existing.category
+            if pe.note:
+                existing.note = pe.note
+            existing.financial_impact_score = pe.financial_impact_score
+            existing.strategic_insight = pe.strategic_insight
+            existing.ai_reasoning_path = pe.ai_reasoning_path
+            existing.anomaly_flags = pe.anomaly_flags
+            existing.requires_approval = requires_approval
+            if existing.approved is None:
+                existing.approved = initial_approved
+            saved_expenses.append(existing)
+        else:
+            expense = Expense(
+                merchant=pe.merchant,
+                amount=pe.amount,
+                currency=pe.currency or "USD",
+                category=pe.category,
+                note=pe.note,
+                expense_date=pe.expense_date or date.today(),
+                financial_impact_score=pe.financial_impact_score,
+                strategic_insight=pe.strategic_insight,
+                ai_reasoning_path=pe.ai_reasoning_path,
+                anomaly_flags=pe.anomaly_flags,
+                requires_approval=requires_approval,
+                approved=initial_approved,
+            )
+            db.add(expense)
+            saved_expenses.append(expense)
 
     db.commit()
 
@@ -160,12 +235,20 @@ async def chat_with_assistant(
             "Is there anything else I can help with?"
         )
 
+    # Surface the pending expense ID so the frontend can pass it back
+    # with the next message — enabling the explicit update path.
+    pending_expense_id: Optional[int] = None
+    if parse_result.needs_clarification:
+        pending_ids = [e.id for e in saved_expenses if e.merchant == "Pending"]
+        pending_expense_id = pending_ids[0] if pending_ids else None
+
     return ChatResponse(
         success=True,
         assistant_message=assistant_message,
         expenses=[ExpenseRead.from_orm(e) for e in saved_expenses],
         recommendations=recommendations,
         needs_clarification=parse_result.needs_clarification,
+        pending_expense_id=pending_expense_id,
     )
 
 
