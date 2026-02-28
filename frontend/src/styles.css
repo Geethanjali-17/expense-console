@@ -1,0 +1,94 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* ─── Base ─────────────────────────────────────────────────────────────── */
+body {
+  font-family: 'Inter', system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+  background: #05050a;
+  color: #f1f5f9;
+}
+
+/* Lock scroll on desktop; natural scroll on mobile */
+@media (min-width: 1024px) {
+  html, body, #root {
+    overflow: hidden;
+    height: 100%;
+  }
+}
+
+/* ─── Glassmorphism card ────────────────────────────────────────────────── */
+.glass-panel {
+  background: rgba(15, 15, 20, 0.72);
+  backdrop-filter: blur(14px);
+  -webkit-backdrop-filter: blur(14px);
+  border: 1px solid rgba(255, 255, 255, 0.07);
+  border-radius: 1rem;
+}
+
+/* ─── Hidden scrollbars ─────────────────────────────────────────────────── */
+.scroll-hidden {
+  overflow-y: auto;
+  scrollbar-width: none;
+  -ms-overflow-style: none;
+}
+.scroll-hidden::-webkit-scrollbar { display: none; }
+
+.scroll-thin {
+  overflow-y: auto;
+  scrollbar-width: none;
+  -ms-overflow-style: none;
+}
+.scroll-thin::-webkit-scrollbar { display: none; }
+
+/* ─── Staggered insight-card reveal ────────────────────────────────────── */
+@keyframes fadeSlideDown {
+  from { opacity: 0; transform: translateY(-12px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+
+.insight-card {
+  animation: fadeSlideDown 0.45s cubic-bezier(0.22, 1, 0.36, 1) both;
+  transition: transform 0.22s ease, box-shadow 0.22s ease;
+  position: relative;
+  z-index: 1;
+}
+.insight-card:hover {
+  transform: scale(1.025);
+  box-shadow: 0 0 28px rgba(99, 102, 241, 0.18), 0 0 0 1px rgba(99, 102, 241, 0.12);
+  z-index: 10;
+}
+.insight-card:nth-child(1) { animation-delay:   0ms; }
+.insight-card:nth-child(2) { animation-delay: 150ms; }
+.insight-card:nth-child(3) { animation-delay: 300ms; }
+.insight-card:nth-child(4) { animation-delay: 450ms; }
+.insight-card:nth-child(5) { animation-delay: 600ms; }
+.insight-card:nth-child(6) { animation-delay: 750ms; }
+
+/* ─── Live indicator pulse ──────────────────────────────────────────────── */
+@keyframes livePulse {
+  0%, 100% { box-shadow: 0 0 0 0   rgba(52, 211, 153, 0.45); }
+  50%       { box-shadow: 0 0 0 5px rgba(52, 211, 153, 0);   }
+}
+.live-dot { animation: livePulse 2.4s ease infinite; }
+
+/* ─── Deep-Dive modal entrance ──────────────────────────────────────────── */
+@keyframes modalBackdropIn {
+  from { opacity: 0; }
+  to   { opacity: 1; }
+}
+@keyframes modalPanelIn {
+  from { opacity: 0; transform: scale(0.94) translateY(10px); }
+  to   { opacity: 1; transform: scale(1)    translateY(0);    }
+}
+.modal-backdrop {
+  animation: modalBackdropIn 0.2s ease both;
+}
+.modal-panel {
+  animation: modalPanelIn 0.28s cubic-bezier(0.22, 1, 0.36, 1) both;
+}
+
+/* Lock body scroll when modal is open */
+body.modal-open {
+  overflow: hidden !important;
+}
