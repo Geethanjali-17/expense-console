@@ -5,6 +5,7 @@ import {
   fetchDriftInsights,
   fetchPendingApprovals,
   searchExpenses,
+  updateExpenseCategory,
 } from "../api";
 import type { DashboardSummary, DriftInsight, Expense } from "../types";
 import {
@@ -65,6 +66,104 @@ const DRIFT_STATUS: Record<string, { bg: string; border: string; pctColor: strin
   improving: { bg: "bg-emerald-950/50", border: "border-emerald-500/15", pctColor: "text-emerald-400", dot: "bg-emerald-400" },
   stable:    { bg: "bg-slate-900/60",   border: "border-white/[0.06]",   pctColor: "text-slate-400",   dot: "bg-slate-400"   },
 };
+
+/* ── Category picker ─────────────────────────────────────────────────── */
+const CATEGORIES = [
+  "groceries", "restaurants", "subscriptions", "entertainment",
+  "travel", "healthcare", "shopping", "apparel",
+  "home & hardware", "utilities", "transport", "education",
+] as const;
+
+interface CategoryPickerProps {
+  expenseId: number;
+  currentCategory: string | null | undefined;
+  anchorRect: DOMRect;
+  onSelect: (id: number, category: string) => Promise<void>;
+  onClose: () => void;
+}
+
+function CategoryPicker({ expenseId, currentCategory, anchorRect, onSelect, onClose }: CategoryPickerProps) {
+  const [saving, setSaving] = useState<string | null>(null);
+
+  // Position: below the trigger, left-aligned, clamped to viewport
+  const top  = Math.min(anchorRect.bottom + 6, window.innerHeight - 260);
+  const left = Math.min(anchorRect.left,       window.innerWidth  - 192);
+
+  // Close on outside click (deferred so the opening click doesn't immediately close)
+  useEffect(() => {
+    const id = setTimeout(() => {
+      function onOutside(e: MouseEvent) {
+        onClose();
+        window.removeEventListener("mousedown", onOutside);
+      }
+      window.addEventListener("mousedown", onOutside);
+      return () => window.removeEventListener("mousedown", onOutside);
+    }, 0);
+    return () => clearTimeout(id);
+  }, [onClose]);
+
+  // Close on Escape
+  useEffect(() => {
+    function onKey(e: KeyboardEvent) { if (e.key === "Escape") onClose(); }
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [onClose]);
+
+  async function pick(cat: string) {
+    if (cat === currentCategory || saving) return;
+    setSaving(cat);
+    await onSelect(expenseId, cat);
+    onClose();
+  }
+
+  return (
+    <div
+      style={{
+        position: "fixed", top, left, zIndex: 200,
+        background: "rgba(10,10,18,0.96)",
+        backdropFilter: "blur(16px)",
+        border: "1px solid rgba(255,255,255,0.09)",
+        borderRadius: "0.75rem",
+        boxShadow: "0 20px 60px rgba(0,0,0,0.6)",
+        width: "12rem",
+        overflow: "hidden",
+      }}
+      onMouseDown={(e) => e.stopPropagation()}
+    >
+      <p className="border-b border-white/[0.06] px-3 py-2 text-[0.6rem] font-semibold uppercase tracking-widest text-slate-600">
+        Set Category
+      </p>
+      {CATEGORIES.map((cat) => {
+        const isActive = cat === currentCategory?.toLowerCase();
+        return (
+          <button
+            key={cat}
+            onClick={() => pick(cat)}
+            disabled={!!saving}
+            className={`flex w-full items-center justify-between px-3 py-1.5 text-left text-[0.72rem] capitalize transition-colors disabled:opacity-50 ${
+              isActive
+                ? "bg-indigo-600/25 text-indigo-300"
+                : "text-slate-300 hover:bg-white/[0.06] hover:text-slate-100"
+            }`}
+          >
+            {cat}
+            {saving === cat && (
+              <svg className="h-3 w-3 animate-spin text-indigo-400" viewBox="0 0 24 24" fill="none">
+                <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
+                <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v8H4z" />
+              </svg>
+            )}
+            {isActive && !saving && (
+              <svg className="h-3 w-3 text-indigo-400" viewBox="0 0 24 24" fill="currentColor">
+                <path fillRule="evenodd" d="M19.916 4.626a.75.75 0 01.208 1.04l-9 13.5a.75.75 0 01-1.154.114l-6-6a.75.75 0 011.06-1.06l5.353 5.353 8.493-12.739a.75.75 0 011.04-.208z" clipRule="evenodd" />
+              </svg>
+            )}
+          </button>
+        );
+      })}
+    </div>
+  );
+}
 
 /* ── Auditor explanation builder ─────────────────────────────────────── */
 function buildAuditorExplanation(d: DriftInsight, txns: Expense[]): string {
@@ -292,6 +391,13 @@ export function Dashboard({ refreshCounter, triggerRefresh }: DashboardProps) {
   const [searchSummary, setSearchSummary] = useState("");
   const [isSearching,   setIsSearching]   = useState(false);
 
+  /* Category picker */
+  const [categoryPicker, setCategoryPicker] = useState<{
+    expenseId: number;
+    anchorRect: DOMRect;
+    currentCategory: string | null | undefined;
+  } | null>(null);
+
   /* ── Data fetching ─────────────────────────────────────────────────── */
   useEffect(() => {
     let cancelled = false;
@@ -406,6 +512,27 @@ export function Dashboard({ refreshCounter, triggerRefresh }: DashboardProps) {
     setSearchInput(""); setSearchResults(null); setSearchSummary("");
   }
 
+  function openCategoryPicker(ev: React.MouseEvent, expense: Expense) {
+    ev.stopPropagation();
+    const rect = (ev.currentTarget as HTMLElement).getBoundingClientRect();
+    setCategoryPicker({ expenseId: expense.id, anchorRect: rect, currentCategory: expense.category });
+  }
+
+  async function handleCategorySelect(id: number, category: string) {
+    try {
+      const updated = await updateExpenseCategory(id, category);
+      // Update in-place in summary + search results so the UI reflects immediately
+      const patch = (list: Expense[]) =>
+        list.map((e) => (e.id === id ? { ...e, category: updated.category } : e));
+      setSummary((prev) =>
+        prev ? { ...prev, recent_expenses: patch(prev.recent_expenses) } : prev
+      );
+      setSearchResults((prev) => (prev ? patch(prev) : prev));
+    } catch {
+      // silent — user can retry
+    }
+  }
+
   /* ── Render ────────────────────────────────────────────────────────── */
   return (
     <section className="flex h-full flex-col gap-4 overflow-hidden">
@@ -415,6 +542,17 @@ export function Dashboard({ refreshCounter, triggerRefresh }: DashboardProps) {
           drift={selectedDrift}
           expenses={deepDiveExpenses}
           onClose={closeDeepDive}
+        />
+      )}
+
+      {/* Category Picker Popover */}
+      {categoryPicker && (
+        <CategoryPicker
+          expenseId={categoryPicker.expenseId}
+          currentCategory={categoryPicker.currentCategory}
+          anchorRect={categoryPicker.anchorRect}
+          onSelect={handleCategorySelect}
+          onClose={() => setCategoryPicker(null)}
         />
       )}
 
@@ -658,6 +796,17 @@ export function Dashboard({ refreshCounter, triggerRefresh }: DashboardProps) {
                         <div className="flex items-center gap-1.5 flex-wrap">
                           <p className="text-[0.72rem] font-semibold text-slate-200">{e.merchant}</p>
                           <span className="text-[0.62rem] text-slate-600">${e.amount.toFixed(2)}</span>
+                          <button
+                            onClick={(ev) => openCategoryPicker(ev, e)}
+                            title="Click to change category"
+                            className={`rounded px-1 py-0.5 text-[0.6rem] transition-colors ${
+                              !e.category || e.category === "Uncategorized"
+                                ? "cursor-pointer text-amber-500/80 ring-1 ring-amber-500/20 hover:bg-amber-950/40 hover:text-amber-300"
+                                : "cursor-pointer capitalize text-slate-600 hover:bg-white/[0.06] hover:text-slate-400"
+                            }`}
+                          >
+                            {!e.category || e.category === "Uncategorized" ? "✎ Uncategorized" : e.category}
+                          </button>
                           {flags.map((f) => <AnomalyChip key={f} flag={f} />)}
                         </div>
                         <p className="mt-0.5 text-[0.67rem] leading-relaxed text-slate-500">{e.strategic_insight}</p>
@@ -691,9 +840,21 @@ export function Dashboard({ refreshCounter, triggerRefresh }: DashboardProps) {
                     className="flex items-center justify-between rounded-lg px-3 py-2 transition-colors hover:bg-white/[0.03]">
                     <div className="min-w-0">
                       <p className="text-[0.72rem] font-medium text-slate-200 truncate">{e.merchant}</p>
-                      <p className="text-[0.62rem] text-slate-600">
-                        {e.category || "Uncategorized"} · {e.expense_date}
-                      </p>
+                      <div className="flex items-center gap-1 text-[0.62rem]">
+                        <button
+                          onClick={(ev) => openCategoryPicker(ev, e)}
+                          title="Click to change category"
+                          className={`rounded px-1 py-0.5 transition-colors ${
+                            !e.category || e.category === "Uncategorized"
+                              ? "cursor-pointer text-amber-500/80 ring-1 ring-amber-500/20 hover:bg-amber-950/40 hover:text-amber-300"
+                              : "cursor-pointer capitalize text-slate-500 hover:bg-white/[0.05] hover:text-slate-300"
+                          }`}
+                        >
+                          {!e.category || e.category === "Uncategorized" ? "✎ Uncategorized" : e.category}
+                        </button>
+                        <span className="text-slate-700">·</span>
+                        <span className="text-slate-600">{e.expense_date}</span>
+                      </div>
                     </div>
                     <p className="ml-3 flex-shrink-0 text-sm font-semibold text-emerald-400">
                       ${e.amount.toFixed(2)}

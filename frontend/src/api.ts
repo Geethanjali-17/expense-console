@@ -45,6 +45,11 @@ export async function decideApproval(
   return data;
 }
 
+export async function updateExpenseCategory(id: number, category: string): Promise<Expense> {
+  const { data } = await axios.patch<Expense>(`${API_BASE}/expenses/${id}/category`, { category });
+  return data;
+}
+
 export async function searchExpenses(query: string): Promise<SearchResponse> {
   const { data } = await axios.post<SearchResponse>(`${API_BASE}/search`, {
     query,

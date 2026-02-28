@@ -73,6 +73,10 @@ class ApprovalDecision(BaseModel):
     decision: Literal["approve", "reject"]
 
 
+class CategoryUpdate(BaseModel):
+    category: str
+
+
 class AnalyticsSummary(BaseModel):
     date: date
     total: float

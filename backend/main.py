@@ -18,6 +18,7 @@ from .llm_client import llm_client
 from .models import Expense
 from .schemas import (
     ApprovalDecision,
+    CategoryUpdate,
     ChatMessage,
     ChatResponse,
     DashboardSummary,
@@ -481,6 +482,22 @@ def get_pending_approvals(db: Session = Depends(get_db)):
         .all()
     )
     return [ExpenseRead.from_orm(e) for e in rows]
+
+
+@app.patch("/expenses/{expense_id}/category", response_model=ExpenseRead)
+def update_expense_category(
+    expense_id: int,
+    payload: CategoryUpdate,
+    db: Session = Depends(get_db),
+):
+    """Update the category of a single expense."""
+    expense = db.get(Expense, expense_id)
+    if not expense:
+        raise HTTPException(status_code=404, detail="Expense not found.")
+    expense.category = payload.category
+    db.commit()
+    db.refresh(expense)
+    return ExpenseRead.from_orm(expense)
 
 
 @app.post("/approvals/{expense_id}/decide", response_model=ExpenseRead)
